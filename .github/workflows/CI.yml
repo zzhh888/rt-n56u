@@ -1,83 +1,78 @@
-name: CI
+name: Build NEWIFI-MINI Padavan
 
-# Controls when the action will run. 
-on: 
-  push:
-  pull_request:
+on:
   workflow_dispatch:
-    inputs:
-      debug_enabled:
-        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'     
-        required: false
-        default: 'no'
-  release:
-    types: [published]
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  contents: read
+
 jobs:
   build:
-    name: build
-    runs-on: ubuntu-20.04
-    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
+    name: Build NEWIFI-MINI firmware
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
     env:
-      build_variant: ${{ matrix.build_variant }}
-      targets: ${{ matrix.targets }}
-      images_dir: /opt/images
-    strategy:
-      matrix:
-        include:
-          - build_variant: "mt7620"
-            targets: "PSG1208 PSG1218 NEWIFI-MINI MI-MINI MI-3 OYE-001 5K-W20"
-          - build_variant: "mt7628"
-            targets: "HC5861B MI-NANO MZ-R13 MZ-R13P 360P2 HC5761A HC5661A"
-          - build_variant: "mt7621"
-            targets: "K2P_nano K2P DIR-878 RM2100 CR660x"
-          - build_variant: "mt7621-usb"
-            targets: "XY-C1 JCG-836PRO JCG-AC860M JCG-Y2 DIR-882 A3004NS MSG1500 WR1200JS MI-R3G NEWIFI3 B70"
+      IMAGES_DIR: /opt/images
+
     steps:
-      - uses: actions/checkout@v2
-      - name: Prepare environment
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        shell: bash
         run: |
-          sudo apt update
-          sudo apt install libtool-bin gperf python3-docutils autopoint gettext
-      - name: Run shellcheck
-        run: sh ./trunk/tools/shellcheck.sh
-      - name: Prepare toolchain
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y             automake             autopoint             bison             build-essential             cmake             cpio             curl             fakeroot             flex             gawk             gettext             gperf             help2man             kmod             libc-dev-bin             libgmp3-dev             libltdl-dev             libmpc-dev             libmpfr-dev             libncurses5-dev             libtool-bin             pkg-config             p7zip-full             python3-docutils             texinfo             unzip             wget             xxd             xz-utils             zlib1g-dev
+
+      - name: Download MIPS toolchain
+        shell: bash
         run: |
+          set -euo pipefail
           cd toolchain-mipsel
           sh dl_toolchain.sh
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled == 'yes' }}
-        with:
-          limit-access-to-actor: true
-      - name: Start build
+
+      - name: Build NEWIFI-MINI firmware
+        shell: bash
         run: |
+          set -euo pipefail
           cd trunk
-          mkdir -p ${images_dir}
-          for m in $targets; do fakeroot ./build_firmware_ci $m; \
-          if [ $? = 0 ]; then cp -f images/*.trx ${images_dir}/$m.trx; else exit 1; fi; \
-          ./clear_tree_simple >/dev/null 2>&1; done
-      - name: Create archive
-        if: ${{ github.event_name != 'release' && success() }}
+          mkdir -p "${IMAGES_DIR}"
+
+          fakeroot ./build_firmware_ci NEWIFI-MINI
+
+          shopt -s nullglob
+          firmware_files=(images/*.trx)
+
+          if [ "${#firmware_files[@]}" -ne 1 ]; then
+            echo "Expected exactly one .trx firmware file; found ${#firmware_files[@]}."
+            printf '%s\n' "${firmware_files[@]}"
+            exit 1
+          fi
+
+          cp -f "${firmware_files[0]}" "${IMAGES_DIR}/NEWIFI-MINI.trx"
+          ls -lh "${IMAGES_DIR}/NEWIFI-MINI.trx"
+
+      - name: Package firmware and checksums
+        shell: bash
         run: |
-          ls -lh ${images_dir}
-          GIT_VERSION=`git rev-parse --short=7 HEAD 2>/dev/null` && [ -n "$GIT_VERSION" ] && \
-          image_name=images_${build_variant}_${GIT_VERSION} || image_name=images_${build_variant}
-          cd ${images_dir}; md5sum *.trx |tee md5sum.txt; 7z a -mx=9 ${image_name}.7z ./*
-          echo "image_name=${image_name}" >> $GITHUB_ENV
-      - name: Upload images to Artifact
-        if: ${{ github.event_name != 'release' && success() }}
-        uses: actions/upload-artifact@v2.2.1
+          set -euo pipefail
+          cd "${IMAGES_DIR}"
+
+          GIT_VERSION="$(git -C "${GITHUB_WORKSPACE}" rev-parse --short=7 HEAD)"
+          ARCHIVE_NAME="NEWIFI-MINI_${GIT_VERSION}.7z"
+
+          md5sum NEWIFI-MINI.trx > md5sum.txt
+          sha256sum NEWIFI-MINI.trx > sha256sum.txt
+          7z a -mx=9 "${ARCHIVE_NAME}"             NEWIFI-MINI.trx             md5sum.txt             sha256sum.txt
+
+          ls -lh "${ARCHIVE_NAME}"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.image_name }}
-          path: ${{ env.images_dir }}/*.7z
-      - name: Upload images to Releases
-        if: ${{ github.event_name == 'release' && success() }}
-        uses: svenstaro/upload-release-action@2.2.0
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ env.images_dir }}/*.trx
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
+          name: NEWIFI-MINI-Padavan
+          path: ${{ env.IMAGES_DIR }}/*.7z
+          if-no-files-found: error
+          retention-days: 14
